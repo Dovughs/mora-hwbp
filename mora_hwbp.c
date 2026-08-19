@@ -2,7 +2,7 @@
  * HWBP AMSI + WLDP + ETW Bypass - DLL version for process injection
  *
  * Compile with MSVC x64:
- *   cl /nologo /Ox /MT /EHsc hwbp_amsi_dll.c /link /DLL /out:hwbp_amsi.dll
+ *   icx.exe /nologo /O3 /MT /EHsc "mora_hwbp.c" /link /DLL /out:"mora_hwbp.dll" /LIBPATH:"C:\Program Files (x86)\Intel\oneAPI\compiler\latest\lib"
  *
  * This DLL, once injected into a process (e.g. PowerShell), will use ONLY
  * Hardware Breakpoints (CPU Debug Registers) to hook:
