@@ -1,5 +1,5 @@
 /*
- * HWBP AMSI + WLDP + ETW Bypass - DLL version for process injection
+ * HWBP AMSI + WLDP + ETW Bypass - DLL version
  *
  * Compile with MSVC x64:
  *   icx.exe /nologo /O3 /MT /EHsc "mora_hwbp.c" /link /DLL /out:"mora_hwbp.dll" /LIBPATH:"C:\Program Files (x86)\Intel\oneAPI\compiler\latest\lib"
