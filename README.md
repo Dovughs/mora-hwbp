@@ -105,27 +105,27 @@ The DLL simply returns `ERROR_SUCCESS (0)` without executing the real function.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                           Target Process (e.g. powershell.exe)           │
 │                                                                          │
-│  ┌──────────────────────────┐        ┌──────────────────────────────────┐  │
-│  │      mora_hwbp.dll       │        │           CPU / Windows          │  │
-│  │                          │        │                                  │  │
-│  │  DllMain / InstallHook   │        │   Thread A        Thread B       │  │
-│  │      │                   │        │   ┌────────┐     ┌────────┐      │  │
-│  │      ▼                   │        │   │ DR0..3 │     │ DR0..3 │      │  │
-│  │  Resolve exports         │        │   └────────┘     └────────┘      │  │
-│  │  (amsi/wldp/ntdll)       │        │                                  │  │
-│  │      │                   │        │   #DB (single-step)              │  │
-│  │      ▼                   │        │   exception ──► Windows Dispatch │  │
-│  │  AddVectoredException    │        │        │                         │  │
-│  │  Handler(VEH)            │        │        ▼                         │  │
-│  │      │                   │        │  ┌─────────────────────────────┐ │  │
-│  │      ▼                   │        │  │  VectoredHandler (ours)     │ │  │
-│  │  SetHwbpOnThread(ALL)    │        │  │  • match #DB address        │ │  │
-│  │      │                   │        │  │  • rewrite context (RIP/RSP)│ │  │
-│  │      ▼                   │        │  │  • spoof return value (RAX) │ │  │
-│  │  MonitorThread ◄──┐      │        │  │  • continue execution       │ │  │
-│  │  (re-hook every   │      │        │  └─────────────────────────────┘ │  │
-│  │   500ms)          └──────┘        │                                  │  │
-│  └──────────────────────────┘        └──────────────────────────────────┘  │
+│  ┌──────────────────────────┐        ┌──────────────────────────────────┐│
+│  │      mora_hwbp.dll       │        │           CPU / Windows          ││
+│  │                          │        │                                  ││
+│  │  DllMain / InstallHook   │        │   Thread A        Thread B       ││
+│  │      │                   │        │   ┌────────┐     ┌────────┐      ││
+│  │      ▼                   │        │   │ DR0..3 │     │ DR0..3 │      ││
+│  │  Resolve exports         │        │   └────────┘     └────────┘      ││
+│  │  (amsi/wldp/ntdll)       │        │                                  ││
+│  │      │                   │        │   #DB (single-step)              ││
+│  │      ▼                   │        │   exception ──► Windows Dispatch ││
+│  │  AddVectoredException    │        │        │                         ││
+│  │  Handler(VEH)            │        │        ▼                         ││
+│  │      │                   │        │  ┌─────────────────────────────┐ ││
+│  │      ▼                   │        │  │  VectoredHandler (ours)     │ ││
+│  │  SetHwbpOnThread(ALL)    │        │  │  • match #DB address        │ ││
+│  │      │                   │        │  │  • rewrite context (RIP/RSP)│ ││
+│  │      ▼                   │        │  │  • spoof return value (RAX) │ ││
+│  │  MonitorThread ◄──┐      │        │  │  • continue execution       │ ││
+│  │  (re-hook every   │      │        │  └─────────────────────────────┘ ││
+│  │   500ms)          └──────┘        │                                  ││
+│  └──────────────────────────┘        └──────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
