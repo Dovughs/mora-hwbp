@@ -1,4 +1,4 @@
-# HWBP Engine — AMSI / WLDP / ETW Bypass via Hardware Breakpoints
+# Mora-HWBP — AMSI / WLDP / ETW Telemetry Hooking via Hardware Breakpoints
 
 **A security-research Proof-of-Concept (POC) demonstrating hardware-breakpoint (CPU debug register) based function hooking as an alternative to traditional in-memory code patching.**
 
