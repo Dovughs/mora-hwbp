@@ -38,7 +38,7 @@
 | `DR0`    | `AmsiScanBuffer`    | `amsi.dll` | Neutralize AMSI content scanning        |
 | `DR1`    | `AmsiScanString`    | `amsi.dll` | Neutralize AMSI string scanning         |
 | `DR2`    | `WldpIsClassInApprovedList` | `wldp.dll` | Force WLDP class approval (Device Guard / WDAC) |
-| `DR3`    | `EtwEventWrite`     | `ntdll.dll` | Suppress ETW event tracing             |
+| `DR3`    | `NtTraceEvent`      | `ntdll.dll` | Cut the entire user-mode ETW stream             |
 
 A per-process **Vectored Exception Handler (VEH)** receives the `EXCEPTION_SINGLE_STEP` (0x80000004) faults raised by the debug registers, simulates the original function's *successful* return path by rewriting the exception context, and resumes execution — all **without modifying a single byte of executable memory**.
 
@@ -88,14 +88,14 @@ The DLL sets the `isApproved` output parameter (`RDX`) to `TRUE` and returns `S_
 
 ### ETW — Event Tracing for Windows
 
-`EtwEventWrite` in `ntdll.dll` is the core user-mode sink for virtually all ETW event emission on the system. Suppressing it has broad side effects relevant to security monitoring:
+`NtTraceEvent` in `ntdll.dll` is the lowest-level user-mode entry point into the ETW subsystem — virtually all ETW event emission funnels through it (including `EtwEventWrite` and the higher-level `Etw*` APIs). Hooking it therefore cuts the entire ETW stream from user mode, with broad side effects relevant to security monitoring:
 
 - PowerShell pipeline and script-block logging events
 - .NET assembly load events (`Microsoft-Windows-DotNETRuntime`)
 - AMSI scan-result telemetry
 - Threat-Intelligence provider events consumed by EDR agents
 
-The DLL simply returns `ERROR_SUCCESS (0)` without executing the real function.
+The DLL simply returns `STATUS_SUCCESS (0)` without executing the real function.
 
 ---
 
@@ -138,11 +138,24 @@ The DLL simply returns `ERROR_SUCCESS (0)` without executing the real function.
 5. A **monitor thread** wakes every 500 ms and re-applies the breakpoints to every thread — including **newly created threads** — guaranteeing hook persistence even if a thread is spawned after hooking or if breakpoints are cleared externally.
 6. When any hooked function is called on any thread, the CPU raises a `#DB` single-step exception; Windows dispatches it to the VEH, which simulates a benign return and continues execution.
 
-### Sample Debug Output
+### Lab Validation
 
+Before injection — AMSI blocks the test vector:
+
+```powershell
+PS> "AmsiTestSample:7e72c3ce-861b-4339-8740-0ac1484c1386"
+This script contains malicious content and has been blocked by your antivirus software.
+
+[HWBP] DR0: AmsiScanBuffer      @ 0x... (16 hits)
+[HWBP] DR1: AmsiScanString      @ 0x... (0 hits)
+[HWBP] DR2: WldpIsClassInApprovedList @ 0x... (0 hits)
+[HWBP] DR3: NtTraceEvent        @ 0x... (79 hits)
+[HWBP] VEH: REGISTERED
+[HWBP] Monitor: RUNNING
+PS> "AmsiTestSample:7e72c3ce-861b-4339-8740-0ac1484c1386"
+AmsiTestSample:7e72c3ce-861b-4339-8740-0ac1484c1386
+```
 ![HWBP Engine hook status diagnostics as captured in Sysinternals DebugView](assets/debugview_output.png)
-
-*Figure 1 — Sample diagnostics output captured with Sysinternals DebugView. Each line reports the resolved target address and the live hit counter for its corresponding debug register.*
 
 ---
 
@@ -186,7 +199,7 @@ When a breakpoint triggers, the processor raises a `#DB` exception. On x64 Windo
 3. **Rewrites the context**:
    - `RIP = *(RSP)` → "return" to the original caller by popping the return address.
    - `RSP += 8` → simulate a `ret` (x64 single-instruction unwind).
-   - `RAX = 0` → spoof `S_OK` / `ERROR_SUCCESS` (successful return code).
+   - `RAX = 0` → spoof `S_OK` / `ERROR_SUCCESS` / `STATUS_SUCCESS` (successful return code).
    - `DR6 &= ~0xF` → clear the breakpoint status bits so the instruction can be re-executed later without spurious state.
 4. **Mutates out-parameters** (see [5.4](#54-per-component-interception-logic)).
 5. **Returns `EXCEPTION_CONTINUE_EXECUTION`**, which tells Windows to restart the thread with the modified context — i.e., execution resumes at the *caller*, and the real target function **never runs**.
@@ -226,15 +239,15 @@ HRESULT WldpIsClassInApprovedList(const GUID* classId, PBOOL isApproved, DWORD e
 - Returns `S_OK (0)` in `RAX`.
 - Consequence: the evaluated content class is considered "approved" by the lockdown policy, and AMSI trusts that judgement for the class.
 
-**DR3 — `EtwEventWrite`** (first 4 args in `RCX, RDX, R8, R9`):
+**DR3 — `NtTraceEvent`** (first 4 args in `RCX, RDX, R8, R9`):
 
 ```
-ULONG EtwEventWrite(HANDLE RegHandle, PCEVENT_DESCRIPTOR EventDescriptor,
-                    ULONG UserDataCount, PEVENT_DATA_DESCRIPTOR UserData);
+NTSTATUS NtTraceEvent(HANDLE TraceHandle, ULONG Flags,
+                      ULONG FieldSize, PVOID Fields);
 ```
 
-- Returns `ERROR_SUCCESS (0)` in `RAX` without touching any output parameter.
-- Consequence: ETW providers receive **no** events from the hooked process, suppressing logging of script execution, module loads, process creation, and AMSI telemetry.
+- Returns `STATUS_SUCCESS (0)` in `RAX` without touching any output parameter.
+- Consequence: since `NtTraceEvent` is the lowest-level user-mode ETW entry point, blocking it here suppresses **all** ETW logging from the hooked process — script execution, module loads, process creation, and AMSI telemetry — not just the events emitted through `EtwEventWrite`. This is a strict superset of the previous `EtwEventWrite` hook: `EtwEventWriteEx`, `EtwEventWriteFull`, `EtwEventWriteTransfer`, `EtwWrite`, and the legacy `TraceEvent*` family all funnel through `NtTraceEvent`.
 
 ### 5.5 Thread Management & Hook Persistence
 
@@ -258,7 +271,7 @@ Because debug registers are per-thread, the engine must continuously maintain th
 | `UninstallHook`   | `BOOL WINAPI UninstallHook(void)`  | Stops monitor, clears breakpoints on all threads, removes VEH.        |
 | `GetStats`        | `void WINAPI GetStats(void)`       | Emits current hook status (via `OutputDebugStringA`) — address, hit counters. |
 
-Hit counters (`g_HaveAmsiBuf`, `g_HaveAmsiStr`, `g_HaveWldp`, `g_HaveEtw`) are maintained with `InterlockedIncrement` and are exposed in the debug output, which is useful for validating that interception is actually occurring in a lab environment.
+Hit counters (`g_HaveAmsiBuf`, `g_HaveAmsiStr`, `g_HaveWldp`, `g_HaveNtTrace`) are maintained with `InterlockedIncrement` and are exposed in the debug output, which is useful for validating that interception is actually occurring in a lab environment.
 
 Note that `DllMain` itself performs the full hooking sequence on `DLL_PROCESS_ATTACH`, so the exports are optional conveniences for runtime (un)loading scenarios.
 
@@ -323,13 +336,13 @@ This POC is dual-purpose: the same characteristics that make it effective offens
 | First-chance VEH registration      | Newly added VEH (`AddVectoredExceptionHandler`) shortly before `#DB` storm. |
 | `TH32CS_SNAPTHREAD` + `SuspendThread`/`ResumeThread` | Repeated thread enumeration + suspension patterns (used by the 500 ms monitor). |
 | Load of `wldp.dll`/`amsi.dll` via `LoadLibraryW` when not previously loaded | Anomalous module loads in the target process. |
-| `EtwEventWrite` never reached      | Absence of expected ETW events (PowerShell operational logs silent while scripts run). |
+| `NtTraceEvent` never reached      | Absence of expected ETW events (PowerShell operational logs silent while scripts run). |
 
 ### Recommended Mitigations
 
 1. **Watchdog/self-monitoring agents** — poll `GetThreadContext(CONTEXT_DEBUG_REGISTERS)` on high-value processes and audit any thread with nonzero `DR0–DR3` outside approved debugger profiles.
 2. **Kernel ETW auditing** — enable `Microsoft-Windows-Kernel-Process` + Thread tracing and alert on `NtGetContextThread`/`NtSetContextThread` targeting security-relevant processes.
-3. **EDR user-mode hook integrity** — since hardware hooks bypass memory checks, rely on **behavioral** detection (ETW consumer hooks below `EtwEventWrite`, kernel ETW, AMSI consumer re-check) rather than `.text` integrity alone.
+3. **EDR user-mode hook integrity** — since hardware hooks bypass memory checks, rely on **behavioral** detection (kernel ETW below `NtTraceEvent`, AMSI consumer re-check) rather than `.text` integrity alone.
 4. **Protect the monitor** — in genuinely hostile environments, treat per-thread `SetThreadContext` to *other* processes as an explicit high-severity signal.
 5. **Endpoint hardening** — enable WDAC (which this POC explicitly bypasses for class approval — do not treat WDAC as a standalone defense against in-memory tooling), Credential Guard, and LSASS protection where applicable.
 
@@ -351,6 +364,7 @@ This POC is dual-purpose: the same characteristics that make it effective offens
 - Microsoft Learn — [Antimalware Scan Interface (AMSI)](https://learn.microsoft.com/en-us/windows/win32/amsi/antimalware-scan-interface-portal)
 - Microsoft Learn — [Windows Lockdown Policy (WLDP)](https://learn.microsoft.com/en-us/windows/win32/devnotes/wldp)
 - Microsoft Learn — [Event Tracing for Windows (ETW)](https://learn.microsoft.com/en-us/windows/win32/etw/event-tracing-portal)
+- Community reference — [`NtTraceEvent` (undocumented native API)](https://ntdoc.m417z.com/nttraceevent)
 - Microsoft Learn — [CONTEXT structure & Debug Registers](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context)
 - Intel® 64 and IA-32 Architectures Software Developer's Manual, Vol. 3B — *Debug Registers* (Dr0–Dr7, #DB exception)
 
