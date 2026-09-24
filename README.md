@@ -155,7 +155,7 @@ This script contains malicious content and has been blocked by your antivirus so
 PS> "AmsiTestSample:7e72c3ce-861b-4339-8740-0ac1484c1386"
 AmsiTestSample:7e72c3ce-861b-4339-8740-0ac1484c1386
 ```
-![HWBP Engine hook status diagnostics as captured in Sysinternals DebugView](assets/debugview_output.png)
+![DebugView output](assets/debugview_output.png?v=2)
 
 ---
 
